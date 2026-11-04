@@ -1,0 +1,90 @@
+{
+  "name": "vault-backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Vault \u2014 secure personal document management backend",
+  "license": "UNLICENSED",
+  "scripts": {
+    "build": "nest build",
+    "start": "node dist/main.js",
+    "start:dev": "nest start --watch",
+    "prisma:generate": "prisma generate",
+    "migrate:dev": "prisma migrate dev",
+    "migrate:deploy": "prisma migrate deploy",
+    "bootstrap:admin": "ts-node -T scripts/bootstrap-admin.ts",
+    "gen:keys": "ts-node -T scripts/gen-keys.ts",
+    "test": "jest --runInBand",
+    "test:security": "jest --runInBand test/security",
+    "lint:leakage": "bash ../scripts/check-forbidden-strings.sh"
+  },
+  "dependencies": {
+    "@fastify/multipart": "^9.0.3",
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/core": "^11.0.0",
+    "@nestjs/platform-fastify": "^11.0.0",
+    "@nestjs/schedule": "^6.0.0",
+    "@prisma/client": "^6.2.0",
+    "argon2": "^0.41.1",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.1",
+    "otplib": "^12.0.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^11.0.0",
+    "@nestjs/testing": "^11.0.0",
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.10.0",
+    "@types/supertest": "^6.0.2",
+    "jest": "^29.7.0",
+    "prisma": "^6.2.0",
+    "supertest": "^7.0.0",
+    "ts-jest": "^29.2.5",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.2"
+  },
+  "jest": {
+    "moduleFileExtensions": [
+      "js",
+      "json",
+      "ts"
+    ],
+    "rootDir": ".",
+    "testRegex": ".*\\.spec\\.ts$",
+    "transform": {
+      "^.+\\.ts$": [
+        "ts-jest",
+        {
+          "isolatedModules": true
+        }
+      ]
+    },
+    "testEnvironment": "node",
+    "globalSetup": "<rootDir>/test/global-setup.ts",
+    "setupFiles": [
+      "<rootDir>/test/setup-env.ts"
+    ],
+    "testTimeout": 60000,
+    "maxWorkers": 1,
+    "roots": [
+      "<rootDir>/src",
+      "<rootDir>/test"
+    ],
+    "modulePathIgnorePatterns": [
+      "<rootDir>/dist/",
+      "<rootDir>/var/"
+    ],
+    "testPathIgnorePatterns": [
+      "/node_modules/",
+      "<rootDir>/dist/"
+    ]
+  },
+  "allowScripts": {
+    "@prisma/client@6.19.3": true,
+    "@prisma/engines@6.19.3": true,
+    "argon2@0.41.1": true,
+    "prisma@6.19.3": true
+  }
+}

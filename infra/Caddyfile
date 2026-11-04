@@ -1,0 +1,88 @@
+# Vault — reverse proxy.
+#
+# Caddy is the only public listener. The API binds to loopback and is never
+# reachable directly. Two jobs here, both security-relevant:
+#
+#   1. terminate TLS and add HSTS
+#   2. make sure the administrator surface is not on the public hostname
+#
+# Replace vault.example.com with your own domain. Prefer publishing through a
+# Cloudflare Tunnel or Tailscale rather than forwarding a port from a
+# residential connection — the client then resolves a neutral hostname and the
+# origin address never appears in DNS.
+
+{
+	# No email banner, no admin API on a public interface.
+	admin off
+	servers {
+		# Do not advertise the proxy in responses.
+		trusted_proxies static private_ranges
+	}
+}
+
+# ─────────────────────────── Client-facing host ─────────────────────────────
+vault.example.com {
+	encode gzip
+
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Content-Security-Policy "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+		Permissions-Policy "geolocation=(), camera=(), microphone=()"
+
+		# Nothing identifies the software or its version.
+		-Server
+		-X-Powered-By
+		-Via
+	}
+
+	# The administrator API must never be served on the public hostname. The
+	# application also guards these routes, but a client that cannot reach them
+	# at all cannot probe them either — and a 404 here is indistinguishable
+	# from any other unmatched path.
+	handle /api/v1/admin/* {
+		respond `{"error":{"code":"NOT_FOUND","requestId":"proxy"}}` 404 {
+			close
+		}
+	}
+
+	handle /api/v1/* {
+		reverse_proxy 127.0.0.1:3000 {
+			header_up X-Forwarded-For {remote_host}
+			# Streaming a large document must not be buffered in the proxy.
+			flush_interval -1
+		}
+	}
+
+	# Anything else looks exactly like a document that does not exist.
+	handle {
+		respond `{"error":{"code":"NOT_FOUND","requestId":"proxy"}}` 404
+	}
+
+	# No access log by default: request paths carry document ids, and query
+	# strings carry search terms. Enable only with the URI redacted.
+	log {
+		output discard
+	}
+}
+
+# ───────────────────── Administrator host (private only) ────────────────────
+#
+# Bind this to a LAN address or an overlay-network interface (WireGuard,
+# Tailscale). It must not be resolvable or routable from the internet.
+#
+# admin.vault.internal {
+# 	bind 100.x.y.z
+#
+# 	handle /api/v1/admin/* {
+# 		reverse_proxy 127.0.0.1:3000
+# 	}
+#
+# 	handle {
+# 		root * /srv/vault-admin
+# 		try_files {path} /index.html
+# 		file_server
+# 	}
+# }

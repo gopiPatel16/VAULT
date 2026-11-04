@@ -1,0 +1,75 @@
+# Vault — self-hosted deployment.
+#
+#   docker compose up -d
+#
+# Postgres is not published to the host: only the api service can reach it, on
+# the internal network. The API itself is only reachable through Caddy.
+
+name: vault
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: vault
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: vault
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [internal]
+    # Deliberately no `ports:` mapping. The database is not a public service.
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U vault -d vault']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ../backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      # Binds inside the container network only; Caddy is the sole ingress.
+      HOST: 0.0.0.0
+      PORT: 3000
+      DATABASE_URL: postgresql://vault:${POSTGRES_PASSWORD}@postgres:5432/vault
+      JWT_SECRET: ${JWT_SECRET:?run npm run gen:keys}
+      SERVER_PEPPER: ${SERVER_PEPPER:?run npm run gen:keys}
+      STORAGE_KEK: ${STORAGE_KEK:?run npm run gen:keys}
+      IP_HASH_SALT: ${IP_HASH_SALT:?run npm run gen:keys}
+      STORAGE_ROOT: /data/storage
+      ADMIN_ORIGIN: ${ADMIN_ORIGIN:-http://localhost:5173}
+    volumes:
+      # Document blobs. Back this up together with the database AND the
+      # STORAGE_KEK — any one of the three alone is useless.
+      - storage:/data/storage
+    networks: [internal, edge]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [api]
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    networks: [edge]
+
+networks:
+  internal:
+    internal: true
+  edge: {}
+
+volumes:
+  pgdata:
+  storage:
+  caddydata:
+  caddyconfig:

@@ -1,0 +1,329 @@
+// Vault — data model.
+//
+// Design rules encoded here:
+//   * Document ids are random UUIDs, never sequential (defence in depth for IDOR).
+//   * `storageKey` and encryption material never leave the backend.
+//   * `VaultSecret` is a single enforced row: a second master password cannot exist.
+//   * Document access is DENY BY DEFAULT — a client sees a document only via an
+//     explicit ClientDocumentAccess row or ClientCategoryAccess on its category.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────────── Administrators ─────────────────────────────
+
+model Admin {
+  id                 String    @id @default(uuid()) @db.Uuid
+  username           String    @unique
+  passwordHash       String    @map("password_hash")
+  totpSecretEnc      Bytes     @map("totp_secret_enc")
+  totpEnabled        Boolean   @default(false) @map("totp_enabled")
+  recoveryCodeHashes String[]  @map("recovery_code_hashes")
+  failedAttempts     Int       @default(0) @map("failed_attempts")
+  lockedUntil        DateTime? @map("locked_until") @db.Timestamptz(3)
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  lastLoginAt        DateTime? @map("last_login_at") @db.Timestamptz(3)
+
+  sessions         AdminSession[]
+  enrollmentCodes  EnrollmentCode[]
+  uploadedDocs     Document[]
+  vaultSecretEdits VaultSecret[]
+
+  @@map("admins")
+}
+
+model AdminSession {
+  id         String    @id @default(uuid()) @db.Uuid
+  adminId    String    @map("admin_id") @db.Uuid
+  tokenHash  Bytes     @unique @map("token_hash")
+  issuedAt   DateTime  @default(now()) @map("issued_at") @db.Timestamptz(3)
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(3)
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(3)
+  stepUpAt   DateTime? @map("step_up_at") @db.Timestamptz(3)
+  ipHash     String?   @map("ip_hash")
+
+  admin Admin @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@index([adminId])
+  @@index([expiresAt])
+  @@map("admin_sessions")
+}
+
+// ─────────────────────────── Clients and devices ──────────────────────────
+
+enum ClientStatus {
+  active
+  suspended
+  revoked
+}
+
+model Client {
+  id           String       @id @default(uuid()) @db.Uuid
+  displayName  String       @map("display_name")
+  loginId      String       @unique @map("login_id")
+  passwordHash String       @map("password_hash")
+  status       ClientStatus @default(active)
+  maxDevices   Int          @default(5) @map("max_devices")
+  createdAt    DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  revokedAt    DateTime?    @map("revoked_at") @db.Timestamptz(3)
+
+  devices         Device[]
+  sessions        Session[]
+  enrollmentCodes EnrollmentCode[]
+  grants          DocumentGrant[]
+  favorites       Favorite[]
+  categoryAccess  ClientCategoryAccess[]
+  documentAccess  ClientDocumentAccess[]
+
+  @@map("clients")
+}
+
+enum DeviceStatus {
+  active
+  revoked
+}
+
+model Device {
+  id         String       @id @default(uuid()) @db.Uuid
+  clientId   String       @map("client_id") @db.Uuid
+  name       String
+  platform   String
+  publicKey  Bytes        @map("public_key") // P-256 public key, SPKI DER
+  status     DeviceStatus @default(active)
+  enrolledAt DateTime     @default(now()) @map("enrolled_at") @db.Timestamptz(3)
+  lastSeenAt DateTime?    @map("last_seen_at") @db.Timestamptz(3)
+  revokedAt  DateTime?    @map("revoked_at") @db.Timestamptz(3)
+
+  client   Client          @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  sessions Session[]
+  grants   DocumentGrant[]
+
+  @@index([clientId])
+  @@map("devices")
+}
+
+model EnrollmentCode {
+  id             String    @id @default(uuid()) @db.Uuid
+  clientId       String    @map("client_id") @db.Uuid
+  codeHash       Bytes     @unique @map("code_hash")
+  expiresAt      DateTime  @map("expires_at") @db.Timestamptz(3)
+  usedAt         DateTime? @map("used_at") @db.Timestamptz(3)
+  createdByAdmin String    @map("created_by_admin") @db.Uuid
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  admin  Admin  @relation(fields: [createdByAdmin], references: [id])
+
+  @@index([clientId])
+  @@map("enrollment_codes")
+}
+
+/// Layer-1 sessions. Refresh tokens rotate; presenting a rotated-out token
+/// revokes the entire family (reuse detection).
+model Session {
+  id               String    @id @default(uuid()) @db.Uuid
+  clientId         String    @map("client_id") @db.Uuid
+  deviceId         String    @map("device_id") @db.Uuid
+  refreshTokenHash Bytes     @unique @map("refresh_token_hash")
+  familyId         String    @map("family_id") @db.Uuid
+  issuedAt         DateTime  @default(now()) @map("issued_at") @db.Timestamptz(3)
+  expiresAt        DateTime  @map("expires_at") @db.Timestamptz(3)
+  revokedAt        DateTime? @map("revoked_at") @db.Timestamptz(3)
+  reuseDetectedAt  DateTime? @map("reuse_detected_at") @db.Timestamptz(3)
+
+  client Client          @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  device Device          @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  grants DocumentGrant[]
+
+  @@index([deviceId])
+  @@index([familyId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+// ──────────────────────────────── Documents ───────────────────────────────
+
+model Category {
+  id        String   @id @default(uuid()) @db.Uuid
+  slug      String   @unique
+  name      String
+  sortOrder Int      @default(0) @map("sort_order")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  documents    Document[]
+  clientAccess ClientCategoryAccess[]
+
+  @@map("categories")
+}
+
+model Document {
+  id               String    @id @default(uuid()) @db.Uuid
+  title            String
+  originalFilename String    @map("original_filename")
+  mimeType         String    @map("mime_type") // server-detected, never client-supplied
+  sizeBytes        BigInt    @map("size_bytes")
+  sha256           Bytes
+  categoryId       String    @map("category_id") @db.Uuid
+  // ── never serialised to any client-facing response ──
+  storageKey       String    @map("storage_key")
+  encDek           Bytes     @map("enc_dek")
+  encDekNonce      Bytes     @map("enc_dek_nonce")
+  encDekTag        Bytes     @map("enc_dek_tag")
+  // ────────────────────────────────────────────────────
+  searchText       String    @map("search_text")
+  documentDate     DateTime? @map("document_date") @db.Date
+  uploadedAt       DateTime  @default(now()) @map("uploaded_at") @db.Timestamptz(3)
+  updatedAt        DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  deletedAt        DateTime? @map("deleted_at") @db.Timestamptz(3)
+  uploadedBy       String?   @map("uploaded_by") @db.Uuid
+
+  category     Category               @relation(fields: [categoryId], references: [id])
+  admin        Admin?                 @relation(fields: [uploadedBy], references: [id], onDelete: SetNull)
+  tags         DocumentTag[]
+  favorites    Favorite[]
+  clientAccess ClientDocumentAccess[]
+
+  @@index([categoryId])
+  @@index([deletedAt])
+  @@index([uploadedAt])
+  @@map("documents")
+}
+
+model Tag {
+  id        String        @id @default(uuid()) @db.Uuid
+  name      String        @unique
+  documents DocumentTag[]
+
+  @@map("tags")
+}
+
+model DocumentTag {
+  documentId String @map("document_id") @db.Uuid
+  tagId      String @map("tag_id") @db.Uuid
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  tag      Tag      @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([documentId, tagId])
+  @@map("document_tags")
+}
+
+/// Default deny. Access is granted per category …
+model ClientCategoryAccess {
+  clientId   String   @map("client_id") @db.Uuid
+  categoryId String   @map("category_id") @db.Uuid
+  grantedAt  DateTime @default(now()) @map("granted_at") @db.Timestamptz(3)
+
+  client   Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@id([clientId, categoryId])
+  @@map("client_category_access")
+}
+
+/// … or per individual document.
+model ClientDocumentAccess {
+  clientId   String   @map("client_id") @db.Uuid
+  documentId String   @map("document_id") @db.Uuid
+  grantedAt  DateTime @default(now()) @map("granted_at") @db.Timestamptz(3)
+
+  client   Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@id([clientId, documentId])
+  @@map("client_document_access")
+}
+
+model Favorite {
+  clientId   String   @map("client_id") @db.Uuid
+  documentId String   @map("document_id") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  client   Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@id([clientId, documentId])
+  @@map("favorites")
+}
+
+// ────────────────────── Document Master Password (Layer 2) ────────────────
+
+/// Exactly one row, enforced by a CHECK constraint added in the migration.
+model VaultSecret {
+  id              Int       @id @default(1)
+  dmpHash         String?   @map("dmp_hash") // argon2id(password || pepper)
+  dmpVersion      Int       @default(0) @map("dmp_version")
+  grantTtlSeconds Int       @default(300) @map("grant_ttl_seconds")
+  configuredAt    DateTime? @map("configured_at") @db.Timestamptz(3)
+  updatedAt       DateTime? @map("updated_at") @db.Timestamptz(3)
+  updatedBy       String?   @map("updated_by") @db.Uuid
+
+  admin Admin? @relation(fields: [updatedBy], references: [id], onDelete: SetNull)
+
+  @@map("vault_secret")
+}
+
+/// A Layer-2 authorisation. Opaque server-side token — NOT a JWT — so that
+/// "invalidate everything" is a single UPDATE.
+model DocumentGrant {
+  id         String    @id @default(uuid()) @db.Uuid
+  tokenHash  Bytes     @unique @map("token_hash")
+  clientId   String    @map("client_id") @db.Uuid
+  deviceId   String    @map("device_id") @db.Uuid
+  sessionId  String    @map("session_id") @db.Uuid
+  dmpVersion Int       @map("dmp_version")
+  issuedAt   DateTime  @default(now()) @map("issued_at") @db.Timestamptz(3)
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(3)
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(3)
+
+  client  Client  @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  device  Device  @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@index([clientId])
+  @@map("document_grants")
+}
+
+/// Brute-force accounting for the Document Master Password.
+model DmpAttempt {
+  id        BigInt   @id @default(autoincrement())
+  clientId  String?  @map("client_id") @db.Uuid
+  deviceId  String?  @map("device_id") @db.Uuid
+  ipHash    String?  @map("ip_hash")
+  success   Boolean
+  at        DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([at])
+  @@index([deviceId, at])
+  @@map("dmp_attempts")
+}
+
+// ────────────────────────────────── Audit ─────────────────────────────────
+
+model AuditLog {
+  id         BigInt   @id @default(autoincrement())
+  at         DateTime @default(now()) @db.Timestamptz(3)
+  actorType  String   @map("actor_type") // admin | client | system
+  actorId    String?  @map("actor_id") @db.Uuid
+  deviceId   String?  @map("device_id") @db.Uuid
+  event      String
+  targetType String?  @map("target_type")
+  targetId   String?  @map("target_id")
+  result     String // success | failure
+  ipHash     String?  @map("ip_hash")
+  metadata   Json     @default("{}")
+  prevHash   Bytes?   @map("prev_hash")
+  entryHash  Bytes    @map("entry_hash")
+
+  @@index([at])
+  @@index([event])
+  @@index([actorId])
+  @@map("audit_log")
+}

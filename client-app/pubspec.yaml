@@ -1,0 +1,46 @@
+name: vault_client
+description: Private Vault — secure document access.
+publish_to: "none"
+version: 0.1.0
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # State. Riverpod keeps the grant and session in providers that can be
+  # disposed as a unit — which is how "lock everything now" is one call.
+  flutter_riverpod: ^2.5.1
+
+  # HTTP. Interceptors are where request signing and failure flattening live.
+  dio: ^5.7.0
+
+  # Keychain / Android Keystore-backed storage for the device private key and
+  # the refresh token. The document grant is NEVER written here.
+  flutter_secure_storage: ^9.2.2
+
+  # P-256 ECDSA. The curve is dictated by what Secure Enclave and StrongBox
+  # can hold — see backend SignatureService for why not Ed25519.
+  #
+  # pointycastle rather than `cryptography`: the latter's Ecdsa.p256 throws
+  # UnimplementedError in the pure-Dart backend — it only works through browser
+  # or platform bindings — so key generation failed outright off-device.
+  # pointycastle implements the curve in Dart, which also means the signing
+  # path is exercised by `flutter test` rather than only on a handset.
+  pointycastle: ^3.9.1
+
+  crypto: ^3.0.5
+
+  # App-private directory for previews and downloads. Never the shared
+  # Downloads folder without an explicit per-file user action.
+  path_provider: ^2.1.4
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

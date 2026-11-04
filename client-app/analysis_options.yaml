@@ -1,0 +1,10 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  language:
+    strict-casts: true
+    strict-raw-types: true
+  errors:
+    # An unawaited future here can mean a lock or a wipe that silently did not
+    # happen, so it is an error rather than a suggestion.
+    unawaited_futures: error
